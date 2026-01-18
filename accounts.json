@@ -1,0 +1,10 @@
+[
+  {
+    "note": "我的主号",
+    "token": "Bearer eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.xxxxx..."
+  },
+  {
+    "note": "我的小号",
+    "token": "Bearer eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.yyyyy..."
+  }
+]

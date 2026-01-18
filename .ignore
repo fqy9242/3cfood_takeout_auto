@@ -1,0 +1,6 @@
+# Ignore configuration with secrets
+accounts.json
+*.log
+__pycache__/
+.DS_Store
+.env

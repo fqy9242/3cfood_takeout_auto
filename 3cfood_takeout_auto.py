@@ -2,28 +2,46 @@ import requests
 import time
 import json
 import random
+import os
+import sys
+
+# 配置文件路径
+CONFIG_FILE = "accounts.json"
 
 
 class CampusFoodBot:
-    def __init__(self, token):
+    def __init__(self, account_config):
+        """
+        初始化机器人
+        :param account_config: 包含账号信息的字典 (token, note)
+        """
+        self.token = account_config.get("token")
+        # 如果配置文件里没有备注，默认显示 Unknown
+        self.account_note = account_config.get("note", "Unknown Account")
+
         self.host = "https://waimai.3cfood.com"
-        # 核心请求头
+        # 抓包分析得到的固定推广ID
+        self.spread_token = "o82pvx"
+
+        # 伪装成微信小程序客户端的请求头
         self.headers = {
             "Host": "waimai.3cfood.com",
             "Connection": "keep-alive",
-            "Authorization": token,
+            "Authorization": self.token,
             "version": "4.12.12",
-            "canary_o2o_mini": "o82pvx",
+            "canary_o2o_mini": self.spread_token,
             "visit-from": "2",
             "Content-Type": "application/json;charset=utf-8",
             "User-Agent": "Mozilla/5.0 (Linux; Android 12; M2006J10C Build/SP1A.210812.016; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/116.0.0.0 Mobile Safari/537.36 XWEB/1160285 MMWEBSDK/20251006 MMWEBID/2295 MicroMessenger/8.0.66.2963(0x28004243) WeChat/arm64 Weixin GPVersion/1 NetType/WIFI Language/zh_CN ABI/arm64 MiniProgramEnv/android"
         }
-        # 你的 spread_token (推广ID)，从抓包URL看是固定的
-        self.spread_token = "o82pvx"
+
+    def log(self, message):
+        """格式化日志输出，带有账号备注前缀"""
+        print(f"[{self.account_note}] {message}")
 
     def sign_in(self):
-        """每日签到"""
-        print(">>> 正在执行签到...")
+        """执行每日签到任务"""
+        self.log(">>> Starting daily sign-in...")
         api = "/user/v3/Sign/signIn"
         params = {
             "is_register_user": 1,
@@ -35,26 +53,24 @@ class CampusFoodBot:
             resp = requests.get(self.host + api, headers=self.headers, params=params)
             data = resp.json()
             if data.get("code") == 1000:
-                print(f"✅ 签到成功！当前积分可能+1")
+                self.log("✅ Sign-in successful.")
             else:
-                print(f"⚠️ 签到结果: {data.get('msg')}")
+                self.log(f"⚠️ Sign-in response: {data.get('msg')}")
         except Exception as e:
-            print(f"❌ 签到出错: {e}")
+            self.log(f"❌ Sign-in error: {e}")
 
     def get_shop_list(self):
-        """获取店铺列表"""
-        print(">>> 正在获取店铺列表...")
+        """获取店铺列表，用于后续的收藏任务"""
+        self.log(">>> Fetching shop list...")
         api = "/mall/v2/ShopIndex/getShopListInSortV2"
-        # 参考 Source 4 的参数，把 page 改成 1
         params = {
             "is_register_user": 1,
             "spread_token": self.spread_token,
             "page": 1,
-            "size": 10,  # 获取10个够用了
+            "size": 10,
             "type": 0,
-            "sort_id": 50103,  # 从抓包里提取的分类ID
+            "sort_id": 50103,
             "sort_type": 1,
-            # 经纬度坐标，直接用抓包里的，似乎跟学校有关
             "tag": "108.24513292100694,22.84365749782986"
         }
 
@@ -63,93 +79,123 @@ class CampusFoodBot:
             data = resp.json()
 
             if data.get("code") == 1000 and "data" in data:
-                # 提取店铺列表，返回前5个
-                shop_list = data["data"]["data"]
-                return shop_list
+                return data["data"]["data"]
             else:
-                print(f"⚠️ 获取店铺列表失败: {data.get('msg')}")
+                self.log(f"⚠️ Failed to get shop list: {data.get('msg')}")
                 return []
         except Exception as e:
-            print(f"❌ 获取店铺列表请求异常: {e}")
+            self.log(f"❌ Network error getting shop list: {e}")
             return []
 
     def manage_collection(self, shop_info, action="save"):
         """
-        收藏/取消收藏 单个店铺
-        shop_info: 包含 shop_id, shop_token 等信息的字典
-        action: 'save' (收藏) 或 'del' (取消)
+        执行收藏或取消收藏操作
+        :param shop_info: 店铺信息字典
+        :param action: 'save' 为收藏, 'del' 为取消
         """
         if action == "save":
             api = "/user/v1/user/saveUserCollection"
-            action_text = "收藏"
+            action_text = "Collect"
         else:
             api = "/user/v1/user/delUserCollection"
-            action_text = "取消"
+            action_text = "Un-collect"
 
-        # 构造请求体，数据从 shop_info 动态获取 [cite: 7, 11]
+        # [cite_start]构造请求体 [cite: 7, 11]
         payload = {
             "is_register_user": 1,
             "spread_token": self.spread_token,
             "shop_token": shop_info.get("shop_token"),
             "agent_token": "",
             "shop_id": shop_info.get("shop_id"),
-            "spread_id": shop_info.get("spread_id", 121919)  # 默认值以防万一
+            "spread_id": shop_info.get("spread_id", 121919)
         }
 
         try:
             resp = requests.post(self.host + api, headers=self.headers, json=payload)
             data = resp.json()
-            shop_name = shop_info.get('shop_name', '未知店铺')
+            shop_name = shop_info.get('shop_name', 'Unknown Shop')
 
             if data.get("code") == 1000:
-                print(f"✅ [{shop_name}] {action_text}成功")
+                self.log(f"✅ [{shop_name}] {action_text} success")
             else:
-                print(f"⚠️ [{shop_name}] {action_text}失败: {data.get('msg')}")
+                self.log(f"⚠️ [{shop_name}] {action_text} failed: {data.get('msg')}")
         except Exception as e:
-            print(f"❌ 请求异常: {e}")
+            self.log(f"❌ Request error ({action_text}): {e}")
 
     def run(self):
-        print("=" * 30)
-        print("🚀 校园外卖自动任务开始")
-        print("=" * 30)
+        """单个账号的主执行流程"""
+        self.log("🚀 Starting tasks...")
 
-        # 1. 先签到
+        # 1. 每日签到
         self.sign_in()
         time.sleep(random.randint(1, 3))
 
         # 2. 获取店铺列表
         shops = self.get_shop_list()
-
         if not shops:
-            print("❌ 没有获取到店铺，任务终止")
+            self.log("❌ No shops found, aborting collection tasks.")
             return
 
-        # 3. 循环处理前 5 个店铺
-        # 即使返回的店铺很多，我们也只取前 5 个，因为每日积分上限通常是 5 次
+        # 3. 处理前5个店铺 (每日积分上限通常为5次)
         target_shops = shops[:5]
-        print(f"📋 获取到 {len(shops)} 家店铺，将对前 {len(target_shops)} 家执行刷分...")
+        self.log(f"📋 Found {len(shops)} shops, processing top {len(target_shops)}...")
 
         for index, shop in enumerate(target_shops):
-            print(f"\n--- 正在处理第 {index + 1} 家店铺 ---")
-
-            # 第一步：收藏 (拿积分)
+            # A步骤: 收藏店铺 (获取积分)
             self.manage_collection(shop, action="save")
 
-            # 随机等待 2-4 秒，模拟真人操作，防止过快被封
+            # 随机延迟，模拟真人浏览
             time.sleep(random.randint(2, 4))
 
-            # 第二步：取消收藏 (为了明天能继续刷)
+            # B步骤: 取消收藏 (为了明天能重复刷分)
             self.manage_collection(shop, action="del")
 
-            # 店铺间稍微间隔一下
+            # 店铺之间的操作间隔
             time.sleep(random.randint(1, 2))
 
-        print("\n" + "=" * 30)
-        print("🎉 今日所有任务执行完毕！")
-        print("=" * 30)
+        self.log("🎉 All tasks completed for this account.\n")
+
+
+def load_config():
+    """从 JSON 文件加载账号配置"""
+    if not os.path.exists(CONFIG_FILE):
+        print(f"❌ Error: Config file '{CONFIG_FILE}' not found.")
+        print("Please create it. Format: [{'note': 'name', 'token': '...'}]")
+        sys.exit(1)
+
+    try:
+        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except json.JSONDecodeError:
+        print(f"❌ Error: '{CONFIG_FILE}' is not valid JSON.")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
-    MY_TOKEN = "Bearer eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzcHJlYWRfaWQiOjEyMTkxOSwic2hvcF9pZCI6MCwidXNlcl9pZCI6MTE2MzM3NDAsImxvZ2luX3Rlcm1pbmFsIjoxLCJsb2dpbl9ndWlkIjoiIiwiYXVkIjoiXC9hcGlcL2NvbW1vblwvdXNlckxvZ2luIiwiZXhwIjoxNzY5MTY1MjM0LCJpYXQiOjE3Njg3MzMyMzQsImlzcyI6Imh0dHBzOlwvXC93YWltYWkuM2Nmb29kLmNvbSIsImp0aSI6IjBiZDQ4NDJlNGE5MjkwOGQyNGJiMmM1MDg1YjNkNDZiIn0.82p31dSJUtlEy6DgYJuIplSQEIlrUh0Hwq2uAxlBWUM"
-    bot = CampusFoodBot(MY_TOKEN)
-    bot.run()
+    print("=" * 50)
+    print("   Campus Food Delivery Auto-Bot")
+    print("   校园外卖自动任务脚本")
+    print("=" * 50)
+
+    accounts = load_config()
+    print(f"📂 Loaded {len(accounts)} accounts from config.\n")
+
+    for idx, account_cfg in enumerate(accounts):
+        if not account_cfg.get("token"):
+            print(f"⚠️ Skipping account #{idx + 1} due to missing token.")
+            continue
+
+        try:
+            bot = CampusFoodBot(account_cfg)
+            bot.run()
+        except Exception as e:
+            print(f"❌ Critical error running account {account_cfg.get('note')}: {e}")
+
+        # 多账号切换时的防封控延迟
+        if idx < len(accounts) - 1:
+            wait_time = random.randint(3, 6)
+            print(f"⏳ Waiting {wait_time}s before next account...")
+            time.sleep(wait_time)
+
+    print("=" * 50)
+    print("✅ Batch processing finished.")
