@@ -4,26 +4,28 @@ import json
 import random
 import os
 import sys
+import smtplib
+from email.mime.text import MIMEText
+from email.header import Header
+from email.utils import formataddr
+from datetime import datetime
 
-# 配置文件路径
-CONFIG_FILE = "accounts.json"
+# ================= 配置文件路径 =================
+ACCOUNTS_FILE = "accounts.json"
+SMTP_CONFIG_FILE = "smtp_config.json"
 
+
+# ==============================================
 
 class CampusFoodBot:
-    def __init__(self, account_config):
-        """
-        初始化机器人
-        :param account_config: 包含账号信息的字典 (token, note)
-        """
+    def __init__(self, account_config, smtp_config):
+        self.account = account_config
         self.token = account_config.get("token")
-        # 如果配置文件里没有备注，默认显示 Unknown
-        self.account_note = account_config.get("note", "Unknown Account")
+        self.account_note = account_config.get("note", "未知账号")
+        self.smtp_config = smtp_config  # 传入SMTP配置
 
         self.host = "https://waimai.3cfood.com"
-        # 抓包分析得到的固定推广ID
         self.spread_token = "o82pvx"
-
-        # 伪装成微信小程序客户端的请求头
         self.headers = {
             "Host": "waimai.3cfood.com",
             "Connection": "keep-alive",
@@ -36,12 +38,77 @@ class CampusFoodBot:
         }
 
     def log(self, message):
-        """格式化日志输出，带有账号备注前缀"""
+        """格式化日志输出"""
         print(f"[{self.account_note}] {message}")
 
+    def send_notification(self, title, content):
+        """发送 SMTP 邮件通知 (支持配置分离)"""
+        # 1. 检查接收者邮箱
+        if 'email' not in self.account or not self.account['email']:
+            return
+
+        # 2. 检查 SMTP 配置是否存在
+        if not self.smtp_config:
+            self.log("⚠️ 未检测到 smtp_config.json，跳过邮件发送")
+            return
+
+        sender = self.smtp_config.get('sender_email')
+        password = self.smtp_config.get('sender_pass')
+        host = self.smtp_config.get('smtp_server', 'smtp.qq.com')
+        port = self.smtp_config.get('smtp_port', 465)
+        receiver = self.account['email']
+
+        if not sender or not password:
+            self.log("⚠️ SMTP 配置不完整，请检查 smtp_config.json")
+            return
+
+        try:
+            # 标准化发件人格式，解决 550 错误
+            from_addr = formataddr(["外卖助手", sender])
+            to_addr = formataddr(["用户", receiver])
+
+            message = MIMEText(content, 'html', 'utf-8')
+            message['From'] = from_addr
+            message['To'] = to_addr
+            message['Subject'] = Header(title, 'utf-8')
+
+            # 连接 SMTP
+            smtp_obj = smtplib.SMTP_SSL(host, port, timeout=10)
+            smtp_obj.login(sender, password)
+            smtp_obj.sendmail(sender, [receiver], message.as_string())
+            smtp_obj.quit()
+
+            self.log(f"✅ 邮件通知已发送至 {receiver}")
+        except Exception as e:
+            self.log(f"❌ 邮件发送失败: {e}")
+
+    def get_user_info(self):
+        """获取用户信息及积分余额"""
+        url = "https://waimai.3cfood.com/user/v1/user/getUserInfo"
+        params = {
+            "is_register_user": "1",
+            "show_more": "true"
+        }
+        try:
+            resp = requests.get(url, headers=self.headers, params=params, timeout=15)
+
+            if resp.status_code == 401:
+                return None, None, False
+
+            data = resp.json()
+            if data.get('code') == 1000:
+                score = data['data'].get('score', '未知')
+                nickname = data['data'].get('nick_name', '用户')
+                self.log(f"💰 当前积分: {score}")
+                return nickname, score, True
+        except Exception as e:
+            self.log(f"❌ 获取积分信息失败: {e}")
+
+        return "未知", "未知", True
+
     def sign_in(self):
-        """执行每日签到任务"""
-        self.log(">>> Starting daily sign-in...")
+        """执行每日签到"""
+        self.log("⏳ 正在执行每日签到...")
         api = "/user/v3/Sign/signIn"
         params = {
             "is_register_user": 1,
@@ -50,18 +117,25 @@ class CampusFoodBot:
             "agent_token": ""
         }
         try:
-            resp = requests.get(self.host + api, headers=self.headers, params=params)
+            resp = requests.get(self.host + api, headers=self.headers, params=params, timeout=15)
+
+            if resp.status_code == 401:
+                self.log("❌ Token 已失效 (401 Unauthorized)")
+                return False
+
             data = resp.json()
             if data.get("code") == 1000:
-                self.log("✅ Sign-in successful.")
+                self.log("✅ 签到成功")
             else:
-                self.log(f"⚠️ Sign-in response: {data.get('msg')}")
+                self.log(f"⚠️ 签到返回异常: {data.get('msg')}")
+            return True
         except Exception as e:
-            self.log(f"❌ Sign-in error: {e}")
+            self.log(f"❌ 签到请求错误: {e}")
+            return True
 
     def get_shop_list(self):
-        """获取店铺列表，用于后续的收藏任务"""
-        self.log(">>> Fetching shop list...")
+        """获取店铺列表"""
+        self.log("⏳ 正在获取店铺列表...")
         api = "/mall/v2/ShopIndex/getShopListInSortV2"
         params = {
             "is_register_user": 1,
@@ -75,32 +149,27 @@ class CampusFoodBot:
         }
 
         try:
-            resp = requests.get(self.host + api, headers=self.headers, params=params)
+            resp = requests.get(self.host + api, headers=self.headers, params=params, timeout=15)
             data = resp.json()
 
             if data.get("code") == 1000 and "data" in data:
                 return data["data"]["data"]
             else:
-                self.log(f"⚠️ Failed to get shop list: {data.get('msg')}")
+                self.log(f"⚠️ 获取店铺列表失败: {data.get('msg')}")
                 return []
         except Exception as e:
-            self.log(f"❌ Network error getting shop list: {e}")
+            self.log(f"❌ 获取店铺列表网络错误: {e}")
             return []
 
     def manage_collection(self, shop_info, action="save"):
-        """
-        执行收藏或取消收藏操作
-        :param shop_info: 店铺信息字典
-        :param action: 'save' 为收藏, 'del' 为取消
-        """
+        """收藏或取消收藏操作"""
         if action == "save":
             api = "/user/v1/user/saveUserCollection"
-            action_text = "Collect"
+            action_text = "收藏"
         else:
             api = "/user/v1/user/delUserCollection"
-            action_text = "Un-collect"
+            action_text = "取消收藏"
 
-        # [cite_start]构造请求体 [cite: 7, 11]
         payload = {
             "is_register_user": 1,
             "spread_token": self.spread_token,
@@ -111,91 +180,118 @@ class CampusFoodBot:
         }
 
         try:
-            resp = requests.post(self.host + api, headers=self.headers, json=payload)
+            resp = requests.post(self.host + api, headers=self.headers, json=payload, timeout=15)
             data = resp.json()
-            shop_name = shop_info.get('shop_name', 'Unknown Shop')
+            shop_name = shop_info.get('shop_name', '未知店铺')
 
             if data.get("code") == 1000:
-                self.log(f"✅ [{shop_name}] {action_text} success")
+                self.log(f"✅ [{shop_name}] {action_text}成功")
             else:
-                self.log(f"⚠️ [{shop_name}] {action_text} failed: {data.get('msg')}")
+                self.log(f"⚠️ [{shop_name}] {action_text}失败: {data.get('msg')}")
         except Exception as e:
-            self.log(f"❌ Request error ({action_text}): {e}")
+            self.log(f"❌ 请求错误 ({action_text}): {e}")
 
     def run(self):
-        """单个账号的主执行流程"""
-        self.log("🚀 Starting tasks...")
+        """主任务流程"""
+        self.log("🚀 开始执行任务...")
 
-        # 1. 每日签到
-        self.sign_in()
-        time.sleep(random.randint(1, 3))
+        nickname, start_score, token_valid = self.get_user_info()
 
-        # 2. 获取店铺列表
-        shops = self.get_shop_list()
-        if not shops:
-            self.log("❌ No shops found, aborting collection tasks.")
+        # Token 失效处理
+        if not token_valid:
+            self.send_notification(
+                title=f"【报警】校邦Token失效-{self.account_note}",
+                content=f"账号：{self.account_note}<br>状态：Token已过期，请重新抓包更新！<br>时间：{datetime.now().strftime('%Y-%m-%d %H:%M')}"
+            )
             return
 
-        # 3. 处理前5个店铺 (每日积分上限通常为5次)
+        # 签到
+        if not self.sign_in():
+            self.send_notification(
+                title=f"【报警】校邦Token失效-{self.account_note}",
+                content=f"账号：{self.account_note}<br>状态：Token已过期，请重新抓包更新！<br>时间：{datetime.now().strftime('%Y-%m-%d %H:%M')}"
+            )
+            return
+
+        time.sleep(random.randint(1, 3))
+
+        # 收藏任务
+        shops = self.get_shop_list()
+        if not shops:
+            self.log("❌ 未找到店铺，停止收藏任务")
+            return
+
         target_shops = shops[:5]
-        self.log(f"📋 Found {len(shops)} shops, processing top {len(target_shops)}...")
+        self.log(f"📋 获取到 {len(shops)} 个店铺，将处理前 {len(target_shops)} 个...")
 
         for index, shop in enumerate(target_shops):
-            # A步骤: 收藏店铺 (获取积分)
             self.manage_collection(shop, action="save")
-
-            # 随机延迟，模拟真人浏览
             time.sleep(random.randint(2, 4))
-
-            # B步骤: 取消收藏 (为了明天能重复刷分)
             self.manage_collection(shop, action="del")
-
-            # 店铺之间的操作间隔
             time.sleep(random.randint(1, 2))
 
-        self.log("🎉 All tasks completed for this account.\n")
+        self.log("🎉 该账号所有任务已完成")
+
+        # 任务完成通知
+        final_nickname, final_score, _ = self.get_user_info()
+        if final_score != "未知":
+            self.send_notification(
+                title=f"校邦任务完成-{self.account_note}",
+                content=(
+                    f"用户：{final_nickname}<br>"
+                    f"状态：✅ 今日任务已完成<br>"
+                    f"当前积分余额：<b style='color:red;font-size:20px'>{final_score}</b><br>"
+                    f"时间：{datetime.now().strftime('%Y-%m-%d %H:%M')}"
+                )
+            )
 
 
-def load_config():
-    """从 JSON 文件加载账号配置"""
-    if not os.path.exists(CONFIG_FILE):
-        print(f"❌ Error: Config file '{CONFIG_FILE}' not found.")
-        print("Please create it. Format: [{'note': 'name', 'token': '...'}]")
-        sys.exit(1)
-
+def load_json(file_path):
+    """通用JSON加载函数"""
+    if not os.path.exists(file_path):
+        return None
     try:
-        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+        with open(file_path, 'r', encoding='utf-8') as f:
             return json.load(f)
     except json.JSONDecodeError:
-        print(f"❌ Error: '{CONFIG_FILE}' is not valid JSON.")
-        sys.exit(1)
+        print(f"❌ 错误: '{file_path}' JSON 格式不正确")
+        return None
 
 
 if __name__ == "__main__":
     print("=" * 50)
-    print("   Campus Food Delivery Auto-Bot")
-    print("   校园外卖自动任务脚本")
+    print("   校园外卖自动任务脚本 (Campus Food Auto-Bot)")
     print("=" * 50)
 
-    accounts = load_config()
-    print(f"📂 Loaded {len(accounts)} accounts from config.\n")
+    # 1. 加载账号
+    accounts = load_json(ACCOUNTS_FILE)
+    if not accounts:
+        print(f"❌ 找不到或无法读取 {ACCOUNTS_FILE}，请检查配置。")
+        sys.exit(1)
+
+    # 2. 加载SMTP配置 (允许为空，为空则不发邮件)
+    smtp_config = load_json(SMTP_CONFIG_FILE)
+    if not smtp_config:
+        print(f"⚠️ 未检测到 {SMTP_CONFIG_FILE}，邮件通知功能将禁用。")
+
+    print(f"📂 已加载 {len(accounts)} 个账号配置\n")
 
     for idx, account_cfg in enumerate(accounts):
         if not account_cfg.get("token"):
-            print(f"⚠️ Skipping account #{idx + 1} due to missing token.")
+            print(f"⚠️ 跳过第 {idx + 1} 个账号：缺少 Token")
             continue
 
         try:
-            bot = CampusFoodBot(account_cfg)
+            # 将 smtp_config 传给 Bot
+            bot = CampusFoodBot(account_cfg, smtp_config)
             bot.run()
         except Exception as e:
-            print(f"❌ Critical error running account {account_cfg.get('note')}: {e}")
+            print(f"❌ 账号 {account_cfg.get('note')} 运行发生严重错误: {e}")
 
-        # 多账号切换时的防封控延迟
         if idx < len(accounts) - 1:
             wait_time = random.randint(3, 6)
-            print(f"⏳ Waiting {wait_time}s before next account...")
+            print(f"⏳ 等待 {wait_time} 秒后执行下一个账号...")
             time.sleep(wait_time)
 
     print("=" * 50)
-    print("✅ Batch processing finished.")
+    print("✅ 所有账号批量处理完毕")
